@@ -46,18 +46,34 @@ def distance(lat1, lon1, lat2, lon2):
     return 12742000 * math.asin(math.sqrt(a))
 
 
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+last_error = {"text": ""}
+
+
 async def overpass(query):
     async with aiohttp.ClientSession(headers=HEADERS) as s:
-        for _ in range(2):
+        for url in OVERPASS_URLS:
             try:
-                async with s.post(OVERPASS, data={"data": query},
-                                  timeout=aiohttp.ClientTimeout(total=60)) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        return data.get("elements", [])
-            except Exception:
-                pass
-            await asyncio.sleep(2)
+                async with s.post(url, data={"data": query},
+                                  timeout=aiohttp.ClientTimeout(total=90)) as r:
+                    if r.status != 200:
+                        last_error["text"] = f"{url.split('/')[2]}: HTTP {r.status}"
+                        print(last_error["text"], flush=True)
+                        continue
+                    data = await r.json(content_type=None)
+                    remark = str(data.get("remark", ""))
+                    if "error" in remark.lower():
+                        last_error["text"] = f"{url.split('/')[2]}: {remark[:80]}"
+                        print(last_error["text"], flush=True)
+                        continue
+                    return data.get("elements", [])
+            except Exception as e:
+                last_error["text"] = f"{url.split('/')[2]}: {type(e).__name__}"
+                print(last_error["text"], flush=True)
     return None
 
 
@@ -215,8 +231,10 @@ async def help_command(message: types.Message):
 async def buses(message: types.Message):
     await message.answer("⏳ Yuklanmoqda, biroz kuting...")
     r = await route_list("bus")
+    if r is None:
+        return await message.answer("Ma'lumot manbasi javob bermadi. Keyinroq urinib ko'ring.\n(" + last_error["text"] + ")")
     if not r:
-        return await message.answer("Ma'lumot topilmadi yoki xizmat band. Keyinroq urinib ko'ring.")
+        return await message.answer("Ro'yxat bo'sh chiqdi.")
     await send_chunks(message, f"🚌 Toshkent avtobuslari ({len(r)} ta):", r)
 
 
@@ -224,8 +242,10 @@ async def buses(message: types.Message):
 @dp.message(F.text == "🚇 Metro")
 async def metro(message: types.Message):
     r = await route_list("subway")
+    if r is None:
+        return await message.answer("Ma'lumot manbasi javob bermadi. Keyinroq urinib ko'ring.\n(" + last_error["text"] + ")")
     if not r:
-        return await message.answer("Ma'lumot topilmadi yoki xizmat band. Keyinroq urinib ko'ring.")
+        return await message.answer("Ro'yxat bo'sh chiqdi.")
     await send_chunks(message, "🚇 Toshkent metrosi:", r)
 
 
@@ -295,4 +315,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
