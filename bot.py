@@ -54,26 +54,39 @@ OVERPASS_URLS = [
 last_error = {"text": ""}
 
 
-async def overpass(query):
-    async with aiohttp.ClientSession(headers=HEADERS) as s:
-        for url in OVERPASS_URLS:
-            try:
-                async with s.post(url, data={"data": query},
-                                  timeout=aiohttp.ClientTimeout(total=90)) as r:
-                    if r.status != 200:
-                        last_error["text"] = f"{url.split('/')[2]}: HTTP {r.status}"
-                        print(last_error["text"], flush=True)
-                        continue
-                    data = await r.json(content_type=None)
-                    remark = str(data.get("remark", ""))
-                    if "error" in remark.lower():
-                        last_error["text"] = f"{url.split('/')[2]}: {remark[:80]}"
-                        print(last_error["text"], flush=True)
-                        continue
-                    return data.get("elements", [])
-            except Exception as e:
-                last_error["text"] = f"{url.split('/')[2]}: {type(e).__name__}"
+async def _one(session, url, query, timeout):
+    host = url.split("/")[2]
+    try:
+        async with session.post(url, data={"data": query},
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            if r.status != 200:
+                last_error["text"] = f"{host}: HTTP {r.status}"
                 print(last_error["text"], flush=True)
+                return None
+            data = await r.json(content_type=None)
+            remark = str(data.get("remark", ""))
+            if "error" in remark.lower():
+                last_error["text"] = f"{host}: {remark[:80]}"
+                print(last_error["text"], flush=True)
+                return None
+            return data.get("elements", [])
+    except Exception as e:
+        last_error["text"] = f"{host}: {type(e).__name__}"
+        print(last_error["text"], flush=True)
+        return None
+
+
+async def overpass(query, timeout=30):
+    async with aiohttp.ClientSession(headers=HEADERS) as s:
+        tasks = [asyncio.create_task(_one(s, u, query, timeout)) for u in OVERPASS_URLS]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                res = await fut
+                if res is not None:
+                    return res
+        finally:
+            for t in tasks:
+                t.cancel()
     return None
 
 
@@ -99,11 +112,8 @@ def route_label(tags):
     return ref
 
 
-async def route_list(kind):
-    key = "list_" + kind
-    if key in cache and time.time() - cache[key][0] < 21600:
-        return cache[key][1]
-    els = await overpass(f"[out:json][timeout:60];rel[route={kind}]({BBOX});out tags;")
+async def load_list(kind):
+    els = await overpass(f"[out:json][timeout:60];rel[route={kind}]({BBOX});out tags;", timeout=80)
     if els is None:
         return None
     seen = {}
@@ -112,13 +122,39 @@ async def route_list(kind):
         key2 = t.get("ref") or t.get("name") or str(e["id"])
         seen.setdefault(key2, route_label(t))
     result = [seen[k] for k in sorted(seen, key=lambda x: (len(x), x))]
-    cache[key] = (time.time(), result)
+    if result:
+        cache["list_" + kind] = (time.time(), result)
     return result
 
 
+async def route_list(kind):
+    key = "list_" + kind
+    if key in cache:
+        return cache[key][1]
+    return await load_list(kind)
+
+
+async def warmup():
+    while True:
+        ok = True
+        for kind in ("bus", "subway"):
+            try:
+                r = await load_list(kind)
+                if not r:
+                    ok = False
+            except Exception as e:
+                print("warmup error", e, flush=True)
+                ok = False
+        await asyncio.sleep(21600 if ok else 120)
+
+
 async def stops_and_routes(lat, lon, radius):
+    ckey = (round(lat, 3), round(lon, 3), radius)
+    hit = cache.get(ckey)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
     q = (
-        "[out:json][timeout:40];"
+        "[out:json][timeout:25];"
         f"(node(around:{radius},{lat},{lon})[highway=bus_stop];"
         f"node(around:{radius},{lat},{lon})[public_transport=platform][bus=yes];)->.s;"
         ".s out;"
@@ -138,6 +174,7 @@ async def stops_and_routes(lat, lon, radius):
             for mem in e.get("members", []):
                 if mem["type"] == "node" and mem["ref"] in stops:
                     smap.setdefault(mem["ref"], set()).add(e["id"])
+    cache[ckey] = (time.time(), (stops, rels, smap))
     return stops, rels, smap
 
 
@@ -310,6 +347,7 @@ async def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN topilmadi")
     await start_health_server()
+    asyncio.create_task(warmup())
     await dp.start_polling(bot)
 
 
