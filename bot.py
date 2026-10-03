@@ -1,4 +1,5 @@
 import os
+import socket
 import math
 import time
 import asyncio
@@ -50,6 +51,8 @@ OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 last_error = {"text": ""}
 
@@ -77,7 +80,8 @@ async def _one(session, url, query, timeout):
 
 
 async def overpass(query, timeout=30):
-    async with aiohttp.ClientSession(headers=HEADERS) as s:
+    conn = aiohttp.TCPConnector(family=socket.AF_INET)
+    async with aiohttp.ClientSession(headers=HEADERS, connector=conn) as s:
         tasks = [asyncio.create_task(_one(s, u, query, timeout)) for u in OVERPASS_URLS]
         try:
             for fut in asyncio.as_completed(tasks):
@@ -94,7 +98,8 @@ async def geocode(text):
     params = {"q": text + ", Toshkent", "format": "json", "limit": 1,
               "viewbox": "69.10,41.40,69.45,41.20", "bounded": 1}
     try:
-        async with aiohttp.ClientSession(headers=HEADERS) as s:
+        conn = aiohttp.TCPConnector(family=socket.AF_INET)
+        async with aiohttp.ClientSession(headers=HEADERS, connector=conn) as s:
             async with s.get(NOMINATIM, params=params,
                              timeout=aiohttp.ClientTimeout(total=20)) as r:
                 data = await r.json()
