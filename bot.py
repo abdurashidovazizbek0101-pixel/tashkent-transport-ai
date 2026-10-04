@@ -217,12 +217,38 @@ async def show_nearby(message, lat, lon):
     await message.answer("Eng yaqin bekat xaritada yuqorida." + NOTE, reply_markup=KB)
 
 
-async def find_direct(message, origin, dest_text):
-    await message.answer("🔎 Manzil qidirilmoqda...")
-    g = await geocode(dest_text)
-    if not g:
-        return await message.answer("Bu manzilni topa olmadim. Boshqacha yozib ko'ring (masalan: Chorsu bozori).")
-    dlat, dlon, dname = g
+PLACES = [
+    ("Chorsu bozori", 41.3265, 69.2350),
+    ("Amir Temur xiyoboni", 41.3111, 69.2797),
+    ("Toshkent vokzali", 41.2921, 69.2870),
+    ("Mirzo Ulug'bek", 41.3390, 69.3340),
+    ("Yunusobod", 41.3660, 69.2860),
+    ("Chilonzor", 41.2756, 69.2045),
+    ("Olmazor", 41.3530, 69.2180),
+    ("Aeroport", 41.2579, 69.2812),
+]
+
+
+def places_kb():
+    rows, row = [], []
+    for i, (name, _, _) in enumerate(PLACES):
+        row.append(types.InlineKeyboardButton(text=name, callback_data=f"d:{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def ask_destination(message):
+    await message.answer(
+        "🗺️ Qayerga borasiz? Tugmadan tanlang yoki manzilni yozing:",
+        reply_markup=places_kb())
+
+
+async def find_direct(message, origin, dlat, dlon, short):
+    await message.answer(f"🔎 {short} tomonga yo'nalish qidirilmoqda...")
     a = await stops_and_routes(origin[0], origin[1], 600)
     b = await stops_and_routes(dlat, dlon, 600)
     if a is None or b is None:
@@ -233,7 +259,6 @@ async def find_direct(message, origin, dest_text):
     ra = {r for s in a[2].values() for r in s}
     rb = {r for s in b[2].values() for r in s}
     common = ra & rb
-    short = dname.split(",")[0]
     if not common:
         return await message.answer(
             f"🗺️ {short} tomonga to'g'ridan-to'g'ri aftobus topilmadi. "
@@ -268,21 +293,54 @@ async def help_command(message: types.Message):
     )
 
 
+PAGE = 30
+
+
+def bus_page(r, p):
+    pages = max(1, (len(r) + PAGE - 1) // PAGE)
+    p = max(0, min(p, pages - 1))
+    text = f"🚌 Toshkent avtobuslari ({len(r)} ta) — {p + 1}/{pages}\n\n" + "\n".join(r[p * PAGE:(p + 1) * PAGE])
+    text += "\n\n🔎 Raqamini yozsangiz (masalan: 59), shu yo'nalishni topaman."
+    btns = []
+    if p > 0:
+        btns.append(types.InlineKeyboardButton(text="⬅️ Oldingi", callback_data=f"bp:{p - 1}"))
+    if p < pages - 1:
+        btns.append(types.InlineKeyboardButton(text="Keyingi ➡️", callback_data=f"bp:{p + 1}"))
+    return text, types.InlineKeyboardMarkup(inline_keyboard=[btns] if btns else [])
+
+
 @dp.message(Command("buses"))
 @dp.message(F.text == "🚌 Avtobuslar")
 async def buses(message: types.Message):
-    await message.answer("⏳ Yuklanmoqda, biroz kuting...")
+    if "list_bus" not in cache:
+        await message.answer("⏳ Yuklanmoqda, biroz kuting...")
     r = await route_list("bus")
     if r is None:
         return await message.answer("Ma'lumot manbasi javob bermadi. Keyinroq urinib ko'ring.\n(" + last_error["text"] + ")")
     if not r:
         return await message.answer("Ro'yxat bo'sh chiqdi.")
-    await send_chunks(message, f"🚌 Toshkent avtobuslari ({len(r)} ta):", r)
+    text, kb = bus_page(r, 0)
+    await message.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("bp:"))
+async def on_bus_page(call: types.CallbackQuery):
+    await call.answer()
+    r = await route_list("bus")
+    if not r:
+        return
+    text, kb = bus_page(r, int(call.data[3:]))
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
 
 
 @dp.message(Command("metro"))
 @dp.message(F.text == "🚇 Metro")
 async def metro(message: types.Message):
+    if "list_subway" not in cache:
+        await message.answer("⏳ Yuklanmoqda, biroz kuting...")
     r = await route_list("subway")
     if r is None:
         return await message.answer("Ma'lumot manbasi javob bermadi. Keyinroq urinib ko'ring.\n(" + last_error["text"] + ")")
@@ -303,7 +361,7 @@ async def route(message: types.Message):
     uid = message.from_user.id
     if uid in user_loc:
         user_mode[uid] = "dest"
-        await message.answer("🗺️ Qayerga borasiz? Manzil yoki joy nomini yozing (masalan: Chorsu bozori).")
+        await ask_destination(message)
     else:
         user_mode[uid] = "need_loc"
         await message.answer("Avval joylashuvingizni yuboring:", reply_markup=LOC_KB)
@@ -316,18 +374,43 @@ async def on_location(message: types.Message):
     user_loc[uid] = (lat, lon)
     if user_mode.get(uid) == "need_loc":
         user_mode[uid] = "dest"
-        return await message.answer(
-            "📍 Joylashuv olindi. Endi boradigan manzilni yozing (masalan: Chorsu bozori).",
-            reply_markup=KB)
+        await message.answer("📍 Joylashuv olindi.", reply_markup=KB)
+        return await ask_destination(message)
     await show_nearby(message, lat, lon)
+
+
+@dp.callback_query(F.data.startswith("d:"))
+async def on_place(call: types.CallbackQuery):
+    await call.answer()
+    uid = call.from_user.id
+    name, dlat, dlon = PLACES[int(call.data[2:])]
+    if uid not in user_loc:
+        user_mode[uid] = "need_loc"
+        return await call.message.answer("Avval joylashuvingizni yuboring:", reply_markup=LOC_KB)
+    await find_direct(call.message, user_loc[uid], dlat, dlon, name)
 
 
 @dp.message(F.text)
 async def other_messages(message: types.Message):
     uid = message.from_user.id
     if user_mode.get(uid) == "dest" and uid in user_loc:
+        text = message.text.strip()
+        for ch in "‘’ʻʼ`´":
+            text = text.replace(ch, "'")
+        await message.answer("🔎 Manzil qidirilmoqda...")
+        g = await geocode(text)
+        if not g:
+            return await message.answer(
+                "Bu manzilni topa olmadim. Boshqacha yozing yoki tugmadan tanlang:",
+                reply_markup=places_kb())
         user_mode.pop(uid, None)
-        return await find_direct(message, user_loc[uid], message.text.strip())
+        return await find_direct(message, user_loc[uid], g[0], g[1], g[2].split(",")[0])
+    t = message.text.strip().upper()
+    if 1 <= len(t) <= 4 and "list_bus" in cache:
+        found = [x for x in cache["list_bus"][1] if x.split(":")[0].upper() == t]
+        if found:
+            return await message.answer("🚌 " + "\n".join(found), reply_markup=KB)
+        return await message.answer(f"{t} raqamli aftobus ro'yxatda topilmadi.", reply_markup=KB)
     await message.answer(
         "🤖 Men Toshkent transport yordamchisiman.\n\n"
         "Tugmalardan birini tanlang yoki /start ni bosing.",
